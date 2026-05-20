@@ -39,9 +39,7 @@ export default function Navbar() {
               <NavLink to="/hospitals" className={linkClass}>
                 Hospitals
               </NavLink>
-              <NavLink to="/profile" className={linkClass}>
-                Profile
-              </NavLink>
+              
             </>
           )}
           {user && role === "captain" && (

@@ -1,4 +1,5 @@
 // Root JSX app with react-router-dom
+import "leaflet/dist/leaflet.css";
 import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
@@ -17,7 +18,7 @@ import Book from "./pages/Book";
 import Track from "./pages/Track";
 import Hospitals from "./pages/Hospitals";
 import Profile from "./pages/Profile";
-
+import "leaflet/dist/leaflet.css";
 function PageTransitions({ children }) {
   const location = useLocation();
   const ref = useRef(null);

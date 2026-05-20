@@ -1,250 +1,423 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { GoogleMap, Marker, useJsApiLoader } from "@react-google-maps/api";
-import { io } from "socket.io-client";
+
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  Polyline,
+} from "react-leaflet";
+
+import L from "leaflet";
+
+import "leaflet/dist/leaflet.css";
+
 import api from "../services/api";
 import Loader from "../components/Loader";
-import { useToast } from "../components/Toast";
 
-const GMAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "";
+// =======================
+// LEAFLET DEFAULT ICON FIX
+// =======================
 
-const socket = io("http://localhost:4000");
+delete L.Icon.Default.prototype._getIconUrl;
 
-const STATUS_LABELS = {
-  pending: "🔍 Searching for ambulance...",
-  accepted: "✅ Ambulance accepted",
-  ongoing: "🚑 Ambulance on the way",
-  completed: "✔️ Ride completed",
-  cancelled: "❌ Ride cancelled",
-};
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl:
+    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
 
-function haversineKm(a, b) {
-  const R = 6371;
+  iconUrl:
+    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
 
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  shadowUrl:
+    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+});
 
-  const x =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((a.lat * Math.PI) / 180) *
-      Math.cos((b.lat * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
+// =======================
+// PROFESSIONAL AMBULANCE VAN ICON
+// =======================
 
-  return 2 * R * Math.asin(Math.sqrt(x));
-}
+const ambulanceIcon = new L.Icon({
+  iconUrl:
+    "https://cdn-icons-png.flaticon.com/512/1048/1048315.png",
+
+  iconRetinaUrl:
+    "https://cdn-icons-png.flaticon.com/512/3774/3774299.png",
+
+  shadowUrl:
+    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+
+  iconSize: [60, 60],
+
+  shadowSize: [60, 60],
+
+  iconAnchor: [40, 40],
+
+  popupAnchor: [0, -35],
+});
+
+// =======================
+// PICKUP ICON
+// =======================
+
+const pickupIcon = new L.Icon({
+  iconUrl:
+    "https://cdn-icons-png.flaticon.com/512/684/684908.png",
+
+  iconRetinaUrl:
+    "https://cdn-icons-png.flaticon.com/512/684/684908.png",
+
+  iconSize: [42, 42],
+
+  iconAnchor: [21, 42],
+
+  popupAnchor: [0, -35],
+});
 
 export default function Track() {
   const { rideId } = useParams();
 
   const navigate = useNavigate();
-  const toast = useToast();
+
+  // =======================
+  // STATES
+  // =======================
 
   const [ride, setRide] = useState(null);
-  const [ambulance, setAmbulance] = useState(null);
 
-  const tickRef = useRef(0);
+  const [loading, setLoading] = useState(true);
 
-  const { isLoaded } = useJsApiLoader({
-    googleMapsApiKey: GMAPS_KEY,
+  const [ambulance, setAmbulance] = useState({
+    lat: 23.2899,
+    lng: 77.4326,
   });
 
+  const [routePath, setRoutePath] = useState([]);
+
+  // =======================
+  // FETCH RIDE
+  // =======================
+
   useEffect(() => {
-    let active = true;
+    fetchRide();
+  }, []);
 
-    const fetchRide = async () => {
+  const fetchRide = async () => {
+    try {
+      const token = localStorage.getItem("token");
+
+      const { data } = await api.get(
+        `/rides/get-ride?rideId=${rideId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      setRide(data);
+
+      setLoading(false);
+    } catch (err) {
+      console.log(err);
+
+      setLoading(false);
+    }
+  };
+
+  // =======================
+  // PICKUP LOCATION
+  // =======================
+
+  const pickup = useMemo(() => {
+    if (!ride?.pickup) {
+      return {
+        lat: 23.2599,
+        lng: 77.4126,
+      };
+    }
+
+    return {
+      lat: ride.pickup.lat,
+      lng: ride.pickup.lng,
+    };
+  }, [ride]);
+
+  // =======================
+  // AMBULANCE MOVEMENT
+  // =======================
+
+  useEffect(() => {
+    if (!pickup) return;
+
+    const interval = setInterval(() => {
+      setAmbulance((prev) => ({
+        lat:
+          prev.lat +
+          (pickup.lat - prev.lat) * 0.05,
+
+        lng:
+          prev.lng +
+          (pickup.lng - prev.lng) * 0.05,
+      }));
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [pickup]);
+
+  // =======================
+  // FETCH ROUTE
+  // =======================
+
+  useEffect(() => {
+    if (!ambulance || !pickup) return;
+
+    const fetchRoute = async () => {
       try {
-        const res = await api.get(`/rides/get-ride?rideId=${rideId}`);
+        const url =
+          `https://router.project-osrm.org/route/v1/driving/` +
+          `${ambulance.lng},${ambulance.lat};` +
+          `${pickup.lng},${pickup.lat}` +
+          `?overview=full&geometries=geojson`;
 
-        if (!active) return;
+        const response = await fetch(url);
 
-        setRide(res.data);
+        const data = await response.json();
+
+        if (data.routes?.length > 0) {
+          const coords =
+            data.routes[0].geometry.coordinates.map(
+              ([lng, lat]) => [lat, lng]
+            );
+
+          setRoutePath(coords);
+        }
       } catch (err) {
         console.log(err);
       }
     };
 
-    fetchRide();
+    fetchRoute();
+  }, [ambulance, pickup]);
 
-    const interval = setInterval(fetchRide, 4000);
+  // =======================
+  // DISTANCE + ETA
+  // =======================
 
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [rideId]);
+  const distanceKm = useMemo(() => {
+    const dx = pickup.lat - ambulance.lat;
 
-  useEffect(() => {
-    socket.on("location-update", (data) => {
-      if (data?.location) {
-        setAmbulance({
-          lat: data.location.ltd,
-          lng: data.location.lng,
-        });
-      }
-    });
+    const dy = pickup.lng - ambulance.lng;
 
-    return () => {
-      socket.off("location-update");
-    };
-  }, []);
+    return (
+      Math.sqrt(dx * dx + dy * dy) * 111
+    ).toFixed(2);
+  }, [pickup, ambulance]);
 
-  useEffect(() => {
-    if (!ride?.pickup || ambulance) return;
+  const eta = useMemo(() => {
+    return Math.max(
+      1,
+      Math.round(distanceKm * 1.5)
+    );
+  }, [distanceKm]);
 
-    const pickupCoords = ride.pickup;
-
-    const start = {
-      lat: pickupCoords.lat + 0.03,
-      lng: pickupCoords.lng + 0.03,
-    };
-
-    setAmbulance(start);
-
-    const interval = setInterval(() => {
-      tickRef.current = Math.min(tickRef.current + 0.05, 1);
-
-      const t = tickRef.current;
-
-      setAmbulance({
-        lat: start.lat + (pickupCoords.lat - start.lat) * t,
-        lng: start.lng + (pickupCoords.lng - start.lng) * t,
-      });
-    }, 1500);
-
-    return () => clearInterval(interval);
-  }, [ride, ambulance]);
+  // =======================
+  // END RIDE
+  // =======================
 
   const endRide = async () => {
     try {
-      await api.post("/rides/end-ride", {
-        rideId,
-      });
+      const token = localStorage.getItem("token");
 
-      toast.push("Ride ended successfully", "success");
+      await api.post(
+        "/rides/end-ride",
+        {
+          rideId,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
 
       navigate("/");
     } catch (err) {
       console.log(err);
-
-      toast.push(
-        err?.response?.data?.message || "Failed to end ride",
-        "error"
-      );
     }
   };
 
+  // =======================
+  // LOADING UI
+  // =======================
+
+  if (loading) {
+    return (
+      <Loader label="Loading tracking..." />
+    );
+  }
+
   if (!ride) {
-    return <Loader label="Loading live tracking..." />;
+    return (
+      <div className="min-h-screen flex items-center justify-center text-red-500 text-3xl font-bold">
+        Ride not found
+      </div>
+    );
   }
 
-  let pickup = {
-    lat: 23.2599,
-    lng: 77.4126,
-  };
-
-  if (typeof ride.pickup === "object") {
-    pickup = ride.pickup;
-  }
-
-  const distanceKm =
-    ambulance && pickup ? haversineKm(ambulance, pickup) : 0;
-
-  const etaMin = Math.max(
-    1,
-    Math.round((distanceKm / 40) * 60)
-  );
-
-  const status = ride.status || "pending";
+  // =======================
+  // MAIN UI
+  // =======================
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 grid lg:grid-cols-3 gap-6">
-      <div className="lg:col-span-2 h-[550px] rounded-3xl overflow-hidden shadow-2xl border border-red-100 bg-white">
-        {GMAPS_KEY && isLoaded ? (
-          <GoogleMap
-            mapContainerStyle={{
-              width: "100%",
-              height: "100%",
-            }}
-            center={pickup}
-            zoom={14}
-          >
-            <Marker position={pickup} label="You" />
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-7xl mx-auto grid lg:grid-cols-[2fr_1fr] gap-6">
 
-            {ambulance && (
-              <Marker
-                position={ambulance}
-                label="🚑"
+        {/* MAP */}
+
+        <div className="bg-white rounded-3xl overflow-hidden shadow-lg border border-gray-200">
+          <div className="h-[720px] w-full">
+
+            <MapContainer
+              center={[
+                pickup.lat,
+                pickup.lng,
+              ]}
+              zoom={13}
+              scrollWheelZoom={true}
+              style={{
+                height: "100%",
+                width: "100%",
+              }}
+            >
+
+              {/* TILE */}
+
+              <TileLayer
+                attribution="&copy; OpenStreetMap contributors"
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-            )}
-          </GoogleMap>
-        ) : (
-          <div className="h-full flex items-center justify-center bg-red-50 text-gray-500">
-            {!GMAPS_KEY
-              ? "Add VITE_GOOGLE_MAPS_API_KEY in .env"
-              : "Loading map..."}
-          </div>
-        )}
-      </div>
 
-      <div className="space-y-5">
-        <div className="bg-white p-6 rounded-3xl shadow-lg border border-red-100">
-          <div className="text-xs uppercase text-gray-400 font-bold">
-            Ride Status
-          </div>
+              {/* PICKUP */}
 
-          <div className="text-2xl font-bold mt-2">
-            {STATUS_LABELS[status] || status}
-          </div>
-        </div>
+              <Marker
+                position={[
+                  pickup.lat,
+                  pickup.lng,
+                ]}
+                icon={pickupIcon}
+              >
+                <Popup>
+                  📍 Pickup Location
+                </Popup>
+              </Marker>
 
-        <div className="bg-gradient-to-br from-red-600 to-rose-700 text-white p-6 rounded-3xl shadow-2xl">
-          <div className="text-xs uppercase opacity-80 font-bold">
-            ETA
-          </div>
+              {/* AMBULANCE */}
 
-          <div className="text-5xl font-extrabold mt-2">
-            {etaMin} min
-          </div>
+              <Marker
+                position={[
+                  ambulance.lat,
+                  ambulance.lng,
+                ]}
+                icon={ambulanceIcon}
+              >
+                <Popup>
+                  🚑 Ambulance is arriving
+                </Popup>
+              </Marker>
 
-          <div className="text-sm opacity-90 mt-2">
-            {distanceKm.toFixed(2)} km away
-          </div>
-        </div>
+              {/* ROUTE */}
 
-        <div className="bg-white p-6 rounded-3xl shadow-lg border border-red-100">
-          <div className="text-xs uppercase text-gray-400 font-bold">
-            Ride ID
-          </div>
+              {routePath.length > 0 && (
+                <Polyline
+                  positions={routePath}
+                  pathOptions={{
+                    color: "#ff0000",
+                    weight: 7,
+                    opacity: 0.95,
+                    lineCap: "round",
+                    lineJoin: "round",
+                  }}
+                />
+              )}
 
-          <div className="font-mono text-sm break-all mt-2">
-            {rideId}
-          </div>
+            </MapContainer>
 
-          <div className="mt-4 text-sm text-gray-500">
-            Pickup:
-          </div>
-
-          <div className="font-medium">
-            {typeof ride.pickup === "string"
-              ? ride.pickup
-              : "Current Location"}
-          </div>
-
-          <div className="mt-4 text-sm text-gray-500">
-            Destination:
-          </div>
-
-          <div className="font-medium">
-            {ride.destination || "Nearest Hospital"}
           </div>
         </div>
 
-        <button
-          onClick={endRide}
-          className="w-full py-4 rounded-2xl bg-black text-white font-bold hover:bg-gray-900 transition"
-        >
-          End Ride
-        </button>
+        {/* SIDEBAR */}
+
+        <div className="space-y-6">
+
+          {/* STATUS */}
+
+          <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm">
+            <div className="text-sm uppercase text-gray-400 font-bold">
+              Ride Status
+            </div>
+
+            <div className="mt-4 text-5xl font-black text-red-600 leading-tight">
+              🚑 Ambulance Coming
+            </div>
+          </div>
+
+          {/* ETA */}
+
+          <div className="bg-gradient-to-br from-red-600 to-rose-700 text-white rounded-3xl p-8 shadow-xl">
+            <div className="uppercase text-sm font-bold opacity-80">
+              ETA
+            </div>
+
+            <div className="mt-4 text-7xl font-black">
+              {eta} min
+            </div>
+
+            <div className="mt-3 text-xl">
+              {distanceKm} km away
+            </div>
+          </div>
+
+          {/* DETAILS */}
+
+          <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm">
+
+            <div className="uppercase text-sm text-gray-400 font-bold">
+              Ride ID
+            </div>
+
+            <div className="mt-2 font-semibold break-all">
+              {ride._id}
+            </div>
+
+            <div className="mt-6 text-gray-400 text-sm">
+              Pickup:
+            </div>
+
+            <div className="font-semibold text-lg">
+              {ride.pickup?.address}
+            </div>
+
+            <div className="mt-6 text-gray-400 text-sm">
+              Destination:
+            </div>
+
+            <div className="font-semibold text-lg">
+              Hospital
+            </div>
+
+          </div>
+
+          {/* END BUTTON */}
+
+          <button
+            onClick={endRide}
+            className="w-full py-5 rounded-2xl bg-black text-white font-bold text-xl hover:scale-[1.02] transition"
+          >
+            End Ride
+          </button>
+
+        </div>
       </div>
     </div>
   );
